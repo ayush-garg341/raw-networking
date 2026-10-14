@@ -10,11 +10,15 @@
 #include<linux/if_tun.h>
 #include<net/if.h>
 #include<arpa/inet.h>
-#include <stdint.h>
+#include<stdint.h>
 
 // Configured details of YOUR device
 const uint8_t MY_MAC[6] = {0x00, 0x0C, 0x29, 0xAB, 0xCD, 0xEF}; // Replace with your actual MAC
 const uint8_t MY_IP[4]  = {192, 168, 42, 2};                     // Replace with your actual IP
+
+// Create a buffer string to hold the output text (max IPv4 length is 16 chars)
+char src_ip_str[INET_ADDRSTRLEN];
+char dest_ip_str[INET_ADDRSTRLEN];
 
 #pragma pack(push, 1) // Prevents the compiler from padding the structure
 struct eth_header {
@@ -53,6 +57,38 @@ struct arp_header {
     uint8_t  sender_ip[4];  // IP of the device sending this request
     uint8_t  target_mac[6]; // Target MAC (set to 00:00:00:00:00:00 in requests)
     uint8_t  target_ip[4];  // <--- THIS IS THE IP BEING REQUESTED!
+};
+#pragma pack(pop)
+
+// Define the minimal icmp_header
+#pragma pack(push, 1)
+struct icmp_header {
+    uint8_t type;     // Byte 0: ICMP Message Type
+    uint8_t code;     // Byte 1: ICMP Sub-code
+    uint16_t checksum; // Bytes 2-3: 16-bit Checksum (Big Endian)
+
+    // Byte 4-7: the 4 byte dynamic field
+    union {
+        // For type 8 ( echo request ) & type 0 ( echo reply )
+        struct {
+            uint16_t id;  // Identifier (Big Endian)
+            uint16_t seq; // Sequence Number (Big Endian)
+        } echo;
+
+        // For type 5 ( redirect )
+        uint32_t gateway_ip; // Gateway IPv4 Address
+
+        // For Type 12 (Parameter Problem)
+        struct {
+            uint8_t pointer; // Indicates the byte offset of the error
+            uint8_t unused1;
+            uint16_t unused2;
+        } param;
+
+        // For Type 3 (Unreachable) & Type 11 (Time Exceeded)
+        uint32_t unused;  // Just 4 bytes of zeros
+
+    } rest_of_header;
 };
 #pragma pack(pop)
 
@@ -143,6 +179,157 @@ void parse_arp_request(int tap_fd, unsigned char *buffer) {
 
 }
 
+/**
+ * Calculates the IPv4 header checksum dynamically based on its IHL field.
+ * @param ip_ptr Pointer to the start of the IPv4 header (i.e., ethernet_frame + 14)
+ * @return The calculated 16-bit checksum in Network Byte Order
+ */
+uint16_t calculate_ipv4_checksum(uint8_t *ip_ptr) {
+    // 1. Clear the existing checksum field before calculating.
+    // In a standard IPv4 header, the checksum is a 2-byte field located at byte offset 10.
+    ip_ptr[10] = 0x00;
+    ip_ptr[11] = 0x00;
+
+    // 2. Determine the exact size of this specific IP header.
+    // Extract the lower 4 bits of the first byte to get the IHL.
+    uint8_t ihl = ip_ptr[0] & 0x0F;
+
+    // Convert 32-bit words into total bytes (multiply by 4)
+    uint32_t ip_header_len = ihl * 4;
+
+    // 3. Set up a 16-bit pointer to read the header 2 bytes at a time
+    uint16_t *words = (uint16_t *)ip_ptr;
+    uint32_t sum = 0;
+
+    // 4. Sum up all 16-bit words across the calculated header length
+    // (ip_header_len / 2 gives us the total number of 16-bit pairs)
+    for (size_t i = 0; i < (ip_header_len / 2); i++) {
+        // Raw hexadecimal data ( actual header values like src ip, dest ip etc etc ) taking 2 bytes at a time.
+        sum += words[i];
+    }
+
+    // 5. Fold the 32-bit sum into 16 bits (Handle Carries)
+    // Keep adding the overflow high 16 bits to the low 16 bits until no carry remains.
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+
+    // 6. Take the 1's complement (bitwise invert) and return it
+    return (uint16_t)(~sum);
+}
+
+/**
+ * Calculates the 1's complement checksum for an ICMP packet (header + payload).
+ * @param icmp_ptr Pointer to the start of the ICMP header
+ * @param icmp_len The total length of the ICMP packet in bytes (header + payload)
+ * @return The calculated 16-bit checksum in Network Byte Order
+ */
+uint16_t calculate_icmp_checksum(uint8_t *icmp_ptr, size_t icmp_len) {
+    uint32_t sum = 0;
+    uint16_t *words = (uint16_t *)icmp_ptr;
+    size_t count = icmp_len;
+
+    // 1. Clear the checksum field in the memory buffer first
+    // In the ICMP header structure, the checksum occupies bytes 2 and 3
+    icmp_ptr[2] = 0x00;
+    icmp_ptr[3] = 0x00;
+
+    // 2. Sum up all 16-bit words
+    while (count > 1) {
+        sum += *words++;
+        count -= 2;
+    }
+
+    // 3. Handle an odd byte if the ICMP payload has an odd length
+    if (count > 0) {
+        // Create a padded 16-bit word where the odd byte is in the upper position
+        sum += *(uint8_t *)words;
+    }
+
+    // 4. Fold 32-bit sum into 16 bits (add carrier bits back to the bottom)
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+
+    // 5. Return the bitwise inverted 1's complement result
+    return (uint16_t)(~sum);
+}
+
+void construct_icmp_reply(int tap_fd, unsigned char *buffer) {
+
+    struct eth_header *rx_eth = (struct eth_header *)buffer;
+    struct ip_header *rx_ip = (struct ip_header *)(buffer + 14);
+
+    // Dynamically extract the IHL (Internet Header Length)
+    // The IHL is stored in the lower 4 bits of the version_ihl byte.
+    // Mask out the upper 4 bits (the IP version) using bitwise AND (0x0F).
+    int ip_header_len = rx_ip->version_ihl & 0x0F;
+    // Convert IHL words into total bytes by multiplying by 4
+    uint32_t ihl = ip_header_len * 4;
+
+    // struct icmp_header *icmp = (struct icmp_header*)(rx_ip + ihl);
+    // Very nasty bug, pointer arithmetic, rx_ip is already 20 bytes
+    // So adding 1, will move to 20 bytes
+    // Adding 2, will move to 40 bytes
+    // Adding 3 will move to 60 bytes and soooo on...
+    // Adding 20 will move to 400 bytes, which is wrong because icmp_header is starting at buffer + 14 + ihl
+    // So converting this into character pointer that will move one byte at a time.
+    struct icmp_header *icmp = (struct icmp_header*)((uint8_t *)rx_ip + ihl);
+    printf("--- ICMP Header Extracted ---\n");
+    printf("ICMP Type: %d\n", icmp->type);
+    printf("ICMP Code: %d\n", icmp->code);
+    // Process based on type
+    if (icmp->type == 8) {
+        // Remember to use ntohs for network byte order!
+        uint16_t id = ntohs(icmp->rest_of_header.echo.id);
+        uint16_t seq = ntohs(icmp->rest_of_header.echo.seq);
+        printf("Ping Packet -> ID: %d, Sequence: %d\n", id, seq);
+
+        // Convert the uint32_t directly.
+        // Note: ip->src_ip is already in network byte order, which inet_ntop expects.
+        inet_ntop(AF_INET, &(rx_ip->src_ip), src_ip_str, INET_ADDRSTRLEN);
+        printf("source ip: %s\n", src_ip_str);
+
+        inet_ntop(AF_INET, &(rx_ip->dest_ip), dest_ip_str, INET_ADDRSTRLEN);
+        printf("Destination ip: %s\n", dest_ip_str);
+
+
+        // Prepare the ethernet frame by changing src and dest mac
+        uint8_t remote_mac[6];
+        memcpy(remote_mac, rx_eth->src_mac, 6);
+        // Set up pointers for creating the outgoing response
+        struct eth_header *tx_eth = (struct eth_header *)buffer;
+        memcpy(tx_eth->src_mac, MY_MAC, 6);
+        memcpy(tx_eth->dest_mac, remote_mac, 6);
+        // No need to change the eth type as this is correctly set.
+
+
+        // Prepare the IP header by changing src ip and dest ip
+        struct ip_header *tx_ip = (struct ip_header *)(buffer + 14);
+        uint32_t remote_ip = rx_ip->src_ip;
+        tx_ip->dest_ip = remote_ip;
+        // Copy all 4 bytes directly into the integer's memory space
+        memcpy(&tx_ip->src_ip, MY_IP, sizeof(uint32_t));
+        // re-calculate checksum of ip header after swapping ip addresses.
+        tx_ip->checksum = calculate_ipv4_checksum((uint8_t *)tx_ip);
+
+        // Prepare the ICMP header:
+        icmp->type = 0;
+        uint32_t ip_header_len = (rx_ip->version_ihl & 0x0F) * 4;
+        int icmp_len = ntohs(rx_ip->total_length) - ip_header_len;
+        icmp->checksum = calculate_icmp_checksum((uint8_t *)icmp, icmp_len);
+
+        // Transmit it back:
+        uint16_t ip_total_length = ntohs(rx_ip->total_length);
+        size_t bytes_to_write = 14 + ip_total_length;
+        ssize_t written = write(tap_fd, tx_eth, bytes_to_write);
+        if(written != bytes_to_write) {
+            fprintf(stderr, "Something went wrong, complete data not written");
+        }
+
+    }
+}
+
 void parse_ethernet_header(int tap_fd, int frame_len, unsigned char *buffer) {
     // The buffer now holds raw Layer 2 data!
     printf("\n--- Received a Layer 2 Frame (%d bytes) ---\n", frame_len);
@@ -182,7 +369,9 @@ void parse_ethernet_header(int tap_fd, int frame_len, unsigned char *buffer) {
         switch(ip->protocol) {
         case 1:
             printf("Protocol Detected: ICMP (Ping Request/Reply)\n");
-            // TODO: prepare to send the ICMP ping reply
+
+            construct_icmp_reply(tap_fd, buffer);
+
             break;
         case 6:
             printf("Protocol Detected: TCP\n");
@@ -194,8 +383,8 @@ void parse_ethernet_header(int tap_fd, int frame_len, unsigned char *buffer) {
             printf("Protocol Detected: Other IP Protocol\n");
             break;
         }
-
     }
+
     else if (type == 0x86DD) {
         printf("Protocol Detected: IPv6 Packet\n");
     }

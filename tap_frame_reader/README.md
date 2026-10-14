@@ -172,3 +172,6 @@ sudo ip link set dev tap0 up
 - The ARP Request (The Broadcast): Before Ubuntu can send the ICMP Ping packet, it needs to wrap it in an Ethernet frame. To do that, it needs a Destination MAC Address. Because it doesn't know the MAC address for .2, it pauses the ping and sends an ARP Request out the tap0 interface. This request literally says: "Broadcast to everyone: Who has 192.168.42.2? Tell 192.168.42.1."
 - Your C Program Reads the Frame: That ARP request flows down the virtual cable and pops out of your read(tap_fd, ...) loop as a raw array of hex bytes.
 
+### The packet analogy is:
+- Ethernet Header -> ARP header or IP Header -> ICMP/TCP/UDP Header if IP Header
+- There can be other combination as well, but this is high level encapsulation
