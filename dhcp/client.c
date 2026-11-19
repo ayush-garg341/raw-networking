@@ -1,13 +1,6 @@
 // sudo apt update && sudo apt install libpcap-dev
 // compile with gcc -lpcap option if using pcap header file.
 
-#include<sys/types.h>
-#include<sys/socket.h>
-#include<sys/ioctl.h>
-#include<net/ethernet.h>
-#include<linux/if_packet.h>
-#include<arpa/inet.h>
-#include<net/if.h>
 #ifndef __linux__
 #include<net/if_dl.h>
 #endif
@@ -235,6 +228,28 @@ int main(int argc, char* argv[]) {
     }
 
     PRINT(VERBOSE_LEVEL_INFO, "Sent DHCPDISCOVER (%zd bytes) via %s (XID: 0x%08x)\n", sent, dev, xid);
+
+
+    // Receive DHCP offer from DHCP server
+    struct sockaddr_ll server_addr;
+    socklen_t addr_len = sizeof(server_addr);
+    memset(buffer, 0, 1500);
+
+    ssize_t bytes_received = recvfrom(sock, buffer, 1500, 0,
+                                      (struct sockaddr *)&server_addr, &addr_len);
+
+    if (bytes_received < 0) {
+        perror("recvfrom failed");
+        exit(1);
+    }
+    PRINT(VERBOSE_LEVEL_INFO, "Recieved %d bytes from DHCP server in Offer\n", bytes_received);
+
+    // Pointers to each layer inside the single buffer
+    struct ethhdr *eth  = (struct ethhdr *)buffer;
+    struct iphdr  *ip   = (struct iphdr *)(buffer + sizeof(struct ethhdr));
+    struct udphdr *udp  = (struct udphdr *)(buffer + sizeof(struct ethhdr) + sizeof(struct iphdr));
+    dhcp_t *dhcp = (dhcp_t *)(buffer + sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct udphdr));
+    PRINT(VERBOSE_LEVEL_INFO, "OP code is %d and Htype is %d\n", dhcp->opcode, dhcp->htype);
 
     free(buffer);
     close(sock);

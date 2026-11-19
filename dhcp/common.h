@@ -3,6 +3,13 @@
 
 #include <stdint.h> // Recommended for fixed-width types like int32_t
 #include<unistd.h>
+#include<net/ethernet.h>
+#include<sys/types.h>
+#include<sys/socket.h>
+#include<sys/ioctl.h>
+#include<linux/if_packet.h>
+#include<arpa/inet.h>
+#include<net/if.h>
 
 typedef u_int32_t ip4_t;
 
