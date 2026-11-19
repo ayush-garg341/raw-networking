@@ -46,7 +46,7 @@ int add_option_ip(uint8_t *options, int offset, uint8_t code, uint32_t ip_net_or
 
 size_t build_dhcp_offer(uint8_t *buffer, const uint8_t *client_mac, const uint8_t *server_mac, uint32_t *server_ip, uint32_t xid) {
 
-    uint32_t offered_client_ip = allocate_ip_for_client(client_mac);
+    uint32_t offered_client_ip = htonl(allocate_ip_for_client(client_mac));
 
     // fills the first 1,500 bytes of memory pointed to by buffer with zeros.
     memset(buffer, 0, 1500);

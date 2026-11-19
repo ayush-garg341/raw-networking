@@ -135,7 +135,7 @@ broadcast_addr.sin_addr.s_addr = inet_addr("255.255.255.255");
     - sudo gdb -p <PID>
 - Or if client is not long running program:
     - `sudo ip netns exec dhcp_client_ns gdb --args ./client veth_client`
-- THen use normal gdb commands:
+- Then use normal gdb commands:
     - break parse_dhcp_offer # Break at a function name
     - break dhcp_client.c:85 # Or break at a specific file and line number
     - continue # Resume the process so it waits for incoming packets
@@ -150,3 +150,6 @@ broadcast_addr.sin_addr.s_addr = inet_addr("255.255.255.255");
     - p ntohs($5.uh_sport)
     - p ntohs($5.uh_dport)
     - p ntohs($5.uh_ulen)
+- Conver the address into readable form
+    - Use `inet_ntoa` in GDB:
+        - `p (char *)inet_ntoa(dhcp->yiaddr)` or `p (char *)inet_ntoa(*(struct in_addr *)&dhcp->yiaddr)`
