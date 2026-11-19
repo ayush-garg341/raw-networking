@@ -157,6 +157,94 @@ size_t build_dhcp_discover(uint8_t *buffer, const uint8_t *client_mac, uint32_t 
     return total_len;
 }
 
+size_t build_dhcp_request(uint8_t *buffer, ip4_t yiaddr, ip4_t siaddr, const uint8_t *client_mac, uint32_t xid) {
+    memset(buffer, 0, 1500);
+
+    // Pointers to each layer inside the single buffer
+    struct ethhdr *eth  = (struct ethhdr *)buffer;
+    struct iphdr  *ip   = (struct iphdr *)(buffer + sizeof(struct ethhdr));
+    struct udphdr *udp  = (struct udphdr *)(buffer + sizeof(struct ethhdr) + sizeof(struct iphdr));
+    dhcp_t *dhcp = (dhcp_t *)(buffer + sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct udphdr));
+
+    // ---------------------------------------------------------
+    // 1. DHCP PAYLOAD (300 Bytes)
+    // ---------------------------------------------------------
+    dhcp->opcode       = 1;              // 1 = BOOTREQUEST
+    dhcp->htype        = 1;              // 1 = Ethernet
+    dhcp->hlen         = 6;              // MAC address length
+    dhcp->hops         = 0;
+    dhcp->xid          = htonl(xid);     // Random Transaction ID
+    dhcp->secs         = 0;
+    dhcp->flags        = htons(0x8000);  // Broadcast flag (tells server to broadcast reply)
+    dhcp->ciaddr       = 0; // (Client IP): Must be 0 (0.0.0.0) during initial selection. Even though you were offered an IP, you do not own it yet—you put the offered IP inside Option 50 (Requested IP Address) instead. (Note: ciaddr is only set to your current IP during a lease renewal or rebinding, when Option 50 is omitted).
+    dhcp->yiaddr       = 0; // (Your IP): Always 0 in client-to-server messages. Only the server fills this in (DHCPOFFER and DHCPACK).
+    dhcp->siaddr       = 0; //  (Next Server IP): Always 0 in client requests. Used by servers for TFTP/PXE boot server addresses.
+    dhcp->giaddr       = 0;
+    memcpy(dhcp->chaddr, client_mac, 6); // Client MAC inside DHCP payload
+    dhcp->magic_cookie = htonl(DHCP_MAGIC_COOKIE);
+
+    // DHCP TLV Options
+    int opt = 0;
+    // Option 53: DHCP Message Type = 3 (DHCPREQUEST)
+    dhcp->options[opt++] = 53;
+    dhcp->options[opt++] = 1;
+    dhcp->options[opt++] = 3;
+
+    // Option 50: Requested IP address
+    dhcp->options[opt++] = 50;
+    dhcp->options[opt++] = 4;
+    memcpy(&dhcp->options[opt], &yiaddr, 4);
+    opt += 4;
+
+    // Option 54: IP address of chosen DHCP server.
+    dhcp->options[opt++] = 54;
+    dhcp->options[opt++] = 4;
+    memcpy(&dhcp->options[opt], &siaddr, 4);
+    opt += 4;
+
+
+    // Option 255: End Option
+    dhcp->options[opt++] = 255;
+
+    size_t dhcp_len = sizeof(struct dhcp) + opt;
+    size_t udp_len = sizeof(struct udphdr) + dhcp_len;
+    size_t ip_len = sizeof(struct iphdr) + udp_len;
+    size_t total_len = sizeof(struct ethhdr) + ip_len;
+
+    // ---------------------------------------------------------
+    // 2. UDP HEADER (8 Bytes)
+    // ---------------------------------------------------------
+    udp->source = htons(68);             // DHCP Client Port
+    udp->dest   = htons(67);             // DHCP Server Port
+    udp->len    = htons(udp_len);        // UDP header + DHCP payload
+    udp->check  = 0;                     // Optional in IPv4 (0 = disabled, avoids pseudo-header math)
+
+    // ---------------------------------------------------------
+    // 3. IPv4 HEADER (20 Bytes)
+    // ---------------------------------------------------------
+    ip->ihl      = 5;                    // 5 * 32-bit words = 20 bytes
+    ip->version  = 4;                    // IPv4
+    ip->tos      = 0;
+    ip->tot_len  = htons(ip_len);        // IP header + UDP header + DHCP payload
+    ip->id       = htons(0x1234);        // Identification
+    ip->frag_off = 0;
+    ip->ttl      = 64;                   // Standard Time-To-Live
+    ip->protocol = IPPROTO_UDP;          // Next layer is UDP (17)
+    ip->saddr    = inet_addr("0.0.0.0");         // Client has no IP yet
+    ip->daddr    = inet_addr("255.255.255.255"); // Limited Broadcast
+    ip->check    = 0;                    // Must be 0 before calculating checksum
+    ip->check    = calculate_ip_checksum(ip, sizeof(struct iphdr));
+
+    // ---------------------------------------------------------
+    // 4. ETHERNET HEADER (14 Bytes)
+    // ---------------------------------------------------------
+    memset(eth->h_dest, 0xFF, 6);        // Broadcast MAC: FF:FF:FF:FF:FF:FF
+    memcpy(eth->h_source, client_mac, 6);// Client's MAC address
+    eth->h_proto = htons(ETH_P_IP);      // Next layer is IPv4 (0x0800)
+
+    return total_len;
+}
+
 
 int main(int argc, char* argv[]) {
 
@@ -216,7 +304,7 @@ int main(int argc, char* argv[]) {
     u_int8_t *buffer = malloc(1500 * sizeof(char));
     uint32_t xid = generate_xid();
     size_t packet_len = build_dhcp_discover(buffer, mac, xid);
-    PRINT(VERBOSE_LEVEL_INFO, "Total packet len is: %ld\n", packet_len);
+    PRINT(VERBOSE_LEVEL_INFO, "Total packet len (DHCP DISCOVER) is: %ld\n", packet_len);
 
     // 5. Send the raw Ethernet frame out of veth_client
     ssize_t sent = sendto(sock, buffer, packet_len, 0, (struct sockaddr *)&sll, sizeof(sll));
@@ -250,6 +338,23 @@ int main(int argc, char* argv[]) {
     struct udphdr *udp  = (struct udphdr *)(buffer + sizeof(struct ethhdr) + sizeof(struct iphdr));
     dhcp_t *dhcp = (dhcp_t *)(buffer + sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct udphdr));
     PRINT(VERBOSE_LEVEL_INFO, "OP code is %d and Htype is %d\n", dhcp->opcode, dhcp->htype);
+
+    // Building DHCP request and sending it to server.
+    u_int8_t *dhcp_request_buffer = malloc(1500 * sizeof(char));
+    packet_len = build_dhcp_request(dhcp_request_buffer, dhcp->yiaddr, dhcp->siaddr, mac, xid);
+
+    PRINT(VERBOSE_LEVEL_INFO, "Total packet len (DHCP REQUEST) is: %ld\n", packet_len);
+
+    // 5. Send the raw Ethernet frame out of veth_client
+    sent = sendto(sock, dhcp_request_buffer, packet_len, 0, (struct sockaddr *)&sll, sizeof(sll));
+    if (sent < 0) {
+        perror("sendto failed");
+        free(buffer);
+        close(sock);
+        return 1;
+    }
+
+    PRINT(VERBOSE_LEVEL_INFO, "Sent DHCP REQUEST (%zd bytes) via %s (XID: 0x%08x)\n", sent, dev, xid);
 
     free(buffer);
     close(sock);

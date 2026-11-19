@@ -1,0 +1,4 @@
+- Handle client disconnect on server side
+- Build multi-threaded server to handle concurrent clients
+- Use the appropriate lock primitives while handling IPs in concurrent env
+- Add lease expiration code in dhcp client side, so that it renews with dhcp server.
