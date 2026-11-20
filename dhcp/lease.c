@@ -44,3 +44,15 @@ uint32_t allocate_ip_for_client(const uint8_t *mac) {
     }
     return 0; // Pool exhausted
 }
+
+bool bound_ip_for_client(uint32_t ip) {
+    time_t now = time(NULL);
+    for(int i = 0; i < POOL_SIZE; i++) {
+        if(lease_pool[i].ip_addr == ip) {
+            lease_pool[i].state = LEASE_BOUND;
+            lease_pool[i].expires_at = now + 3600;
+            return true;
+        }
+    }
+    return false;
+}

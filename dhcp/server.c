@@ -3,6 +3,7 @@
 #include<stdlib.h>
 #include<string.h>
 #include<unistd.h>
+#include<stdbool.h>
 #include<arpa/inet.h>
 #include<ifaddrs.h>
 #include<net/if.h>
@@ -79,7 +80,7 @@ size_t build_dhcp_offer(uint8_t *buffer, const uint8_t *client_mac, const uint8_
     dhcp->options[opt++] = 2;
 
     // Option 54: Server Identifer
-    opt = add_option_ip(dhcp->options, opt, 54, offered_client_ip);
+    opt = add_option_ip(dhcp->options, opt, 54, *server_ip);
     // dhcp->options[opt++] = 54;
     // dhcp->options[opt++] = 4; // 4 byte
     // dhcp->options[opt++] = offered_client_ip;
@@ -134,6 +135,61 @@ int get_interface_info(int fd, const char *if_name, uint32_t *ip_net_addr, uint8
 
     memcpy(mac, ifr.ifr_hwaddr.sa_data, 6);
     return 0;
+}
+
+size_t build_dhcp_ack(uint8_t *buffer, const uint8_t *client_mac, uint32_t *offered_client_ip, uint32_t *server_ip, uint32_t xid) {
+
+    // fills the first 1,500 bytes of memory pointed to by buffer with zeros.
+    memset(buffer, 0, 1500);
+
+    // Pointers to each layer inside the single buffer
+    dhcp_t *dhcp = (dhcp_t *)(buffer);
+
+    // ---------------------------------------------------------
+    // 1. DHCP PAYLOAD (300 Bytes)
+    // ---------------------------------------------------------
+    dhcp->opcode       = 2;              // 2 = BOOTREPLY
+    dhcp->htype        = 1;              // 1 = Ethernet
+    dhcp->hlen         = 6;              // MAC address length
+    dhcp->hops         = 0;
+    dhcp->xid          = htonl(xid);     // Random Transaction ID
+    dhcp->secs         = 0;
+    dhcp->flags        = htons(0x8000);  // Broadcast flag (tells server to broadcast reply)
+    dhcp->ciaddr       = 0;              // Must be 0 in DHCPOFFER because the client does not own the IP yet.
+    dhcp->yiaddr       = *offered_client_ip;              // Offered IP
+    dhcp->siaddr       = (ip4_t)server_ip;
+    dhcp->giaddr       = 0;
+    memcpy(dhcp->chaddr, client_mac, 6); // Server MAC inside DHCP payload
+    dhcp->magic_cookie = htonl(DHCP_MAGIC_COOKIE);
+
+    // DHCP TLV Options
+    int opt = 0;
+    // Option 53: DHCP Message Type = 5 (DHCPACK)
+    dhcp->options[opt++] = 53;
+    dhcp->options[opt++] = 1;
+    dhcp->options[opt++] = 5;
+
+    // Option 54: Server Identifer
+    opt = add_option_ip(dhcp->options, opt, 54, *server_ip);
+    // dhcp->options[opt++] = 54;
+    // dhcp->options[opt++] = 4; // 4 byte
+    // dhcp->options[opt++] = offered_client_ip;
+
+    // option 51: IP address lease time
+    uint32_t lease_time = htonl(3600);
+    dhcp->options[opt++] = 51;
+    dhcp->options[opt++] = 4; // 4 byte
+    memcpy(&dhcp->options[opt], &lease_time, 4);
+    opt += 4;
+    // dhcp->options[opt++] = 51;
+    // dhcp->options[opt++] = 4; // 4 byte
+    // dhcp->options[opt++] = htonl(3600);
+
+    // Option 255: End Option
+    dhcp->options[opt++] = 255;
+
+    size_t dhcp_len = sizeof(struct dhcp) + opt;
+    return dhcp_len;
 }
 
 
@@ -241,6 +297,37 @@ int main() {
                 perror("sendto failed (did you enable SO_BROADCAST?)");
             } else {
                 printf("Sent DHCPOFFER (%zd bytes) to 255.255.255.255:68\n", bytes_sent);
+            }
+        }
+        else if(message_type == 3) {
+            PRINT(VERBOSE_LEVEL_INFO, "received dhcp request");
+
+            // Build DHCP accept
+            u_int8_t *dhcp_req_buffer = malloc(1500 * sizeof(char));
+            uint32_t offered_client_ip;
+            memcpy(&offered_client_ip, &options[5], 4);
+            bool is_ip_bound = bound_ip_for_client(ntohl(offered_client_ip));
+            if(!is_ip_bound) {
+                perror("Bounding the IP to client failed");
+                exit(1);
+            }
+            size_t packet_len = build_dhcp_ack(dhcp_req_buffer, client_mac, &offered_client_ip, &server_ip, xid);
+            PRINT(VERBOSE_LEVEL_INFO, "Total DHCP ack packet len is: %ld\n", packet_len);
+
+            // Target 255.255.255.255:68 (DHCP Client Port)
+            struct sockaddr_in broadcast_addr;
+            memset(&broadcast_addr, 0, sizeof(broadcast_addr));
+            broadcast_addr.sin_family      = AF_INET;
+            broadcast_addr.sin_port        = htons(68);
+            broadcast_addr.sin_addr.s_addr = inet_addr("255.255.255.255");
+
+            // Send the DHCPOFFER out of server_fd
+            ssize_t bytes_sent = sendto(server_fd, dhcp_req_buffer, packet_len, 0,
+                                        (struct sockaddr *)&broadcast_addr, sizeof(broadcast_addr));
+            if (bytes_sent < 0) {
+                perror("sendto failed (did you enable SO_BROADCAST?)");
+            } else {
+                printf("Sent DHCPACK (%zd bytes) to 255.255.255.255:68\n", bytes_sent);
             }
         }
     }

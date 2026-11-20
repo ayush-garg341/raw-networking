@@ -337,7 +337,29 @@ int main(int argc, char* argv[]) {
     struct iphdr  *ip   = (struct iphdr *)(buffer + sizeof(struct ethhdr));
     struct udphdr *udp  = (struct udphdr *)(buffer + sizeof(struct ethhdr) + sizeof(struct iphdr));
     dhcp_t *dhcp = (dhcp_t *)(buffer + sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct udphdr));
-    PRINT(VERBOSE_LEVEL_INFO, "OP code is %d and Htype is %d\n", dhcp->opcode, dhcp->htype);
+    // Store different configuration send to you like DNS, gateway IP in variables
+    uint32_t subnet_mask;
+    uint32_t default_gateway;
+    uint32_t dns_name_server;
+    memcpy(&subnet_mask, &dhcp->options[11], 4);
+    memcpy(&default_gateway, &dhcp->options[17], 4);
+    memcpy(&dns_name_server, &dhcp->options[23], 4);
+
+    subnet_mask = ntohl(subnet_mask);
+    default_gateway = ntohl(default_gateway);
+    dns_name_server = ntohl(dns_name_server);
+
+    char mask_str[INET_ADDRSTRLEN];
+    char gw_str[INET_ADDRSTRLEN];
+    char dns_str[INET_ADDRSTRLEN];
+
+    inet_ntop(AF_INET, &subnet_mask, mask_str, INET_ADDRSTRLEN);
+    inet_ntop(AF_INET, &default_gateway, gw_str, INET_ADDRSTRLEN);
+    inet_ntop(AF_INET, &dns_name_server, dns_str, INET_ADDRSTRLEN);
+
+    PRINT(VERBOSE_LEVEL_INFO, "Subnet Mask: %s\n", mask_str);
+    PRINT(VERBOSE_LEVEL_INFO, "Default Gateway: %s\n", gw_str);
+    PRINT(VERBOSE_LEVEL_INFO, "DNS Server: %s\n", dns_str);
 
     // Building DHCP request and sending it to server.
     u_int8_t *dhcp_request_buffer = malloc(1500 * sizeof(char));
@@ -355,6 +377,40 @@ int main(int argc, char* argv[]) {
     }
 
     PRINT(VERBOSE_LEVEL_INFO, "Sent DHCP REQUEST (%zd bytes) via %s (XID: 0x%08x)\n", sent, dev, xid);
+
+    // Receive DHCP offer from DHCP server
+    struct sockaddr_ll server_addr_ack;
+    socklen_t addr_len_ack = sizeof(server_addr);
+    memset(buffer, 0, 1500);
+
+    bytes_received = recvfrom(sock, buffer, 1500, 0,
+                              (struct sockaddr *)&server_addr_ack, &addr_len_ack);
+
+    if (bytes_received < 0) {
+        perror("recvfrom failed");
+        exit(1);
+    }
+    PRINT(VERBOSE_LEVEL_INFO, "Recieved %d bytes from DHCP server in ACK\n", bytes_received);
+    // Pointers to each layer inside the single buffer
+    dhcp_t *dhcp_ack = (dhcp_t *)(buffer + sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct udphdr));
+
+    uint32_t offered_ip = dhcp_ack->yiaddr;
+    char ip_str[INET_ADDRSTRLEN];  // INET_ADDRSTRLEN is 16 bytes
+    // Convert host byte order to network byte order
+    struct in_addr addr;
+    addr.s_addr = htonl(offered_ip);
+    // Convert binary IP to readable string
+    inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
+    PRINT(VERBOSE_LEVEL_INFO, "Offered IP to the client is: %s\n", ip_str);
+
+    uint32_t lease_time = 0;;
+    if(dhcp_ack->options[9] == 51 && dhcp_ack->options[10] == 4) {
+        memcpy(&lease_time, &dhcp->options[11], 4);
+        lease_time = ntohl(lease_time);
+    }
+
+    PRINT(VERBOSE_LEVEL_INFO, "Lease time offered is: %u in ACK\n", lease_time);
+
 
     free(buffer);
     close(sock);

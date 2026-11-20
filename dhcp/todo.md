@@ -1,4 +1,6 @@
-- Handle client disconnect on server side
+- Save the details ( configuration details ) in config file /etc/resolv.conf on client side.
 - Build multi-threaded server to handle concurrent clients
 - Use the appropriate lock primitives while handling IPs in concurrent env
-- Add lease expiration code in dhcp client side, so that it renews with dhcp server.
+- Add lease expiration checking code in dhcp client side, so that it renews with dhcp server.
+- Simulate the wrong DNS or gateway IP and blocking the internet access from client - verify this.
+- Handle client disconnect or switch off wifi from client on server side

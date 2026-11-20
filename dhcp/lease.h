@@ -24,4 +24,6 @@ void init_lease_pool(void);
 
 uint32_t allocate_ip_for_client(const uint8_t *mac);
 
+bool bound_ip_for_client(uint32_t ip);
+
 #endif
